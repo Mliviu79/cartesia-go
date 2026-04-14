@@ -44,15 +44,15 @@ type WSCancelRequest struct {
 
 // WSResponse is a message received from the TTS WebSocket.
 type WSResponse struct {
-	Type       string          `json:"type"`
-	StatusCode int             `json:"status_code"`
-	Done       bool            `json:"done"`
-	ContextID  *string         `json:"context_id,omitempty"`
-	FlushID    *int            `json:"flush_id,omitempty"`
-	Data       string          `json:"data,omitempty"`
-	StepTime   float64         `json:"step_time,omitempty"`
-	FlushDone  bool            `json:"flush_done,omitempty"`
-	Error      string          `json:"error,omitempty"`
+	Type       string  `json:"type"`
+	StatusCode int     `json:"status_code"`
+	Done       bool    `json:"done"`
+	ContextID  *string `json:"context_id,omitempty"`
+	FlushID    *int    `json:"flush_id,omitempty"`
+	Data       string  `json:"data,omitempty"`
+	StepTime   float64 `json:"step_time,omitempty"`
+	FlushDone  bool    `json:"flush_done,omitempty"`
+	Error      string  `json:"error,omitempty"`
 
 	WordTimestamps    *WSTimestamps `json:"word_timestamps,omitempty"`
 	PhonemeTimestamps *WSTimestamps `json:"phoneme_timestamps,omitempty"`
@@ -140,10 +140,20 @@ func (ws *TTSWebSocket) Cancel(ctx context.Context, contextID string) error {
 
 // Receive reads the next message from the WebSocket.
 // Returns the parsed response or an error if the connection is closed.
+//
+// Concurrency note: Close() may be called concurrently from another goroutine
+// to unblock a pending ReadMessage. The closed flag is therefore read under
+// the mutex so the race detector stays happy; the subsequent ReadMessage call
+// is not held under the mutex — if Close races with us, conn.Close()
+// invalidates the underlying net.Conn and ReadMessage returns a net error,
+// which is the intended shutdown path.
 func (ws *TTSWebSocket) Receive(ctx context.Context) (*WSResponse, error) {
+	ws.mu.Lock()
 	if ws.closed {
+		ws.mu.Unlock()
 		return nil, fmt.Errorf("cartesia: websocket is closed")
 	}
+	ws.mu.Unlock()
 
 	_, msg, err := ws.conn.ReadMessage()
 	if err != nil {
