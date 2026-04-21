@@ -28,20 +28,20 @@ type AgentPhoneNumber struct {
 
 // AgentSummary represents a Cartesia agent.
 type AgentSummary struct {
-	ID                string            `json:"id"`
-	CreatedAt         string            `json:"created_at"`
-	DeploymentCount   int               `json:"deployment_count"`
-	HasTextToAgentRun bool              `json:"has_text_to_agent_run"`
-	Name              string            `json:"name"`
-	TTSLanguage       string            `json:"tts_language"`
-	TTSVoice          string            `json:"tts_voice"`
-	UpdatedAt         string            `json:"updated_at"`
-	DeletedAt         *string           `json:"deleted_at,omitempty"`
-	Description       *string           `json:"description,omitempty"`
-	GitDeployBranch   *string           `json:"git_deploy_branch,omitempty"`
-	GitRepository     *GitRepository    `json:"git_repository,omitempty"`
+	ID                string             `json:"id"`
+	CreatedAt         string             `json:"created_at"`
+	DeploymentCount   int                `json:"deployment_count"`
+	HasTextToAgentRun bool               `json:"has_text_to_agent_run"`
+	Name              string             `json:"name"`
+	TTSLanguage       string             `json:"tts_language"`
+	TTSVoice          string             `json:"tts_voice"`
+	UpdatedAt         string             `json:"updated_at"`
+	DeletedAt         *string            `json:"deleted_at,omitempty"`
+	Description       *string            `json:"description,omitempty"`
+	GitDeployBranch   *string            `json:"git_deploy_branch,omitempty"`
+	GitRepository     *GitRepository     `json:"git_repository,omitempty"`
 	PhoneNumbers      []AgentPhoneNumber `json:"phone_numbers,omitempty"`
-	WebhookID         *string           `json:"webhook_id,omitempty"`
+	WebhookID         *string            `json:"webhook_id,omitempty"`
 }
 
 // AgentUpdateParams are the parameters for updating an agent.

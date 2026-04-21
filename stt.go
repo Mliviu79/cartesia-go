@@ -19,9 +19,9 @@ type STTWord struct {
 
 // STTTranscribeResponse is the response from a transcription request.
 type STTTranscribeResponse struct {
-	Text     string   `json:"text"`
-	Duration *float64 `json:"duration,omitempty"`
-	Language *string  `json:"language,omitempty"`
+	Text     string    `json:"text"`
+	Duration *float64  `json:"duration,omitempty"`
+	Language *string   `json:"language,omitempty"`
 	Words    []STTWord `json:"words,omitempty"`
 }
 

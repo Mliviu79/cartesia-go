@@ -49,13 +49,13 @@ type TTSRequest struct {
 
 // TTSInfillParams are the parameters for audio infill.
 type TTSInfillParams struct {
-	LeftAudio      FileParam
-	RightAudio     FileParam
-	Transcript     string
-	VoiceID        string
-	ModelID        string
-	Language       string
-	OutputFormat   *OutputFormat
+	LeftAudio    FileParam
+	RightAudio   FileParam
+	Transcript   string
+	VoiceID      string
+	ModelID      string
+	Language     string
+	OutputFormat *OutputFormat
 }
 
 // Generate produces audio bytes from text.
