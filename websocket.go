@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -67,6 +68,12 @@ type WSTimestamps struct {
 }
 
 // newTTSWebSocket establishes a WebSocket connection to the TTS endpoint.
+//
+// ctx bounds the whole dial: the TCP connect, the TLS handshake and the
+// upgrade exchange. The dialer stops honouring a cancel once the connection is
+// open (only a deadline reaches the upgrade read after that), so the end of
+// ctx closes the connection under the upgrade, and the dial returns an error
+// wrapping context.Cause(ctx). The close is joined before the dial returns.
 func newTTSWebSocket(ctx context.Context, c *Client) (*TTSWebSocket, error) {
 	wsURL := *c.baseURL
 	if wsURL.Scheme == "https" {
@@ -90,7 +97,31 @@ func newTTSWebSocket(ctx context.Context, c *Client) (*TTSWebSocket, error) {
 
 	c.logger.Debug("connecting websocket", zap.String("url", wsURL.Host+wsURL.Path))
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL.String(), header)
+	// cut is the close tied to ctx, registered once the connection is open;
+	// cutDone closes when its callback has closed the connection.
+	var cut func() bool
+	cutDone := make(chan struct{})
+	dialer := *websocket.DefaultDialer
+	dialer.NetDialContext = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+		netConn, err := (&net.Dialer{}).DialContext(dialCtx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		cut = context.AfterFunc(ctx, func() {
+			defer close(cutDone)
+			_ = netConn.Close() // the dial reports ctx's cause, not the close
+		})
+		return netConn, nil
+	}
+	conn, _, err := dialer.DialContext(ctx, wsURL.String(), header)
+	if cut != nil && !cut() {
+		// ctx ended during the dial and its callback closed the connection.
+		<-cutDone
+		if err == nil {
+			_ = conn.Close() // already closed underneath; this releases the rest
+		}
+		return nil, fmt.Errorf("cartesia: websocket dial: %w", context.Cause(ctx))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cartesia: websocket dial: %w", err)
 	}
