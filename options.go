@@ -3,6 +3,7 @@ package cartesia
 import (
 	"net/http"
 	"net/url"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -72,5 +73,16 @@ func WithTracer(t trace.Tracer) ClientOption {
 func WithToken(token string) ClientOption {
 	return func(c *Client) {
 		c.token = token
+	}
+}
+
+// WithCloseWriteBound bounds the write of the close frame a WebSocket sends when
+// it closes: a peer that holds the frame delays Close by at most this long, unless
+// Close's ctx ends first. A zero or negative duration keeps the default of 5 s.
+func WithCloseWriteBound(d time.Duration) ClientOption {
+	return func(c *Client) {
+		if d > 0 {
+			c.closeWriteBound = d
+		}
 	}
 }

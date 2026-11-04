@@ -21,6 +21,8 @@ type Client struct {
 	maxRetries int
 	logger     *zap.Logger
 	tracer     trace.Tracer
+	// closeWriteBound bounds the close frame a WebSocket writes when it closes.
+	closeWriteBound time.Duration
 
 	// Services
 	AccessToken        *AccessTokenService
@@ -43,11 +45,12 @@ func NewClient(apiKey string, opts ...ClientOption) *Client {
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
-		apiKey:     apiKey,
-		version:    APIVersion,
-		maxRetries: 2,
-		logger:     zap.NewNop(),
-		tracer:     noop.NewTracerProvider().Tracer(""),
+		apiKey:          apiKey,
+		version:         APIVersion,
+		maxRetries:      2,
+		logger:          zap.NewNop(),
+		tracer:          noop.NewTracerProvider().Tracer(""),
+		closeWriteBound: defaultCloseWriteBound,
 	}
 
 	for _, opt := range opts {

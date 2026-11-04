@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -15,11 +16,16 @@ import (
 
 // TTSWebSocket is a persistent WebSocket connection for streaming TTS.
 type TTSWebSocket struct {
-	conn   *websocket.Conn
-	client *Client
-	mu     sync.Mutex
-	closed bool
+	conn            *websocket.Conn
+	client          *Client
+	closeWriteBound time.Duration
+	mu              sync.Mutex
+	closed          bool
 }
+
+// defaultCloseWriteBound bounds a WebSocket's close frame write when the client
+// sets none: 5 s, the value ai-runtime's realtime connections default to.
+const defaultCloseWriteBound = 5 * time.Second
 
 // WSGenerationRequest is a TTS generation request sent over WebSocket.
 type WSGenerationRequest struct {
@@ -129,8 +135,9 @@ func newTTSWebSocket(ctx context.Context, c *Client) (*TTSWebSocket, error) {
 	c.logger.Debug("websocket connected")
 
 	return &TTSWebSocket{
-		conn:   conn,
-		client: c,
+		conn:            conn,
+		client:          c,
+		closeWriteBound: c.closeWriteBound,
 	}, nil
 }
 
@@ -203,8 +210,13 @@ func (ws *TTSWebSocket) Receive(ctx context.Context) (*WSResponse, error) {
 	return &resp, nil
 }
 
-// Close closes the WebSocket connection.
-func (ws *TTSWebSocket) Close() error {
+// Close sends the close frame once, best-effort, and then closes the connection.
+// It never waits for the peer's close. ctx is the closing caller's: when it ends,
+// the frame's write is cut at once and the transport closes, so a peer that holds
+// the frame does not delay the caller. A live ctx leaves the frame's write to the
+// connection's close write bound. The transport closes after the write, whatever
+// its result.
+func (ws *TTSWebSocket) Close(ctx context.Context) error {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 
@@ -213,5 +225,18 @@ func (ws *TTSWebSocket) Close() error {
 	}
 	ws.closed = true
 	ws.client.logger.Debug("closing websocket")
+
+	// cutDone closes once the cut has run, so none of its work outlives Close.
+	cutDone := make(chan struct{})
+	stopCut := context.AfterFunc(ctx, func() {
+		defer close(cutDone)
+		_ = ws.conn.Close() // fails the frame's write in flight, which then ends at once
+	})
+	_ = ws.conn.WriteControl(websocket.CloseMessage, // best-effort: the transport closes next either way
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(ws.closeWriteBound))
+	if !stopCut() {
+		<-cutDone // the cut ran and closed the transport
+		return nil
+	}
 	return ws.conn.Close()
 }
