@@ -15,11 +15,17 @@ import (
 )
 
 // TTSWebSocket is a persistent WebSocket connection for streaming TTS.
+//
+// Data writes take writeTurn, one at a time, because gorilla/websocket allows one
+// concurrent writer. Close never waits for a write: it reads and sets closed under
+// stateMu, which no I/O runs under, and writes its close frame with WriteControl,
+// which gorilla allows alongside a write in flight.
 type TTSWebSocket struct {
 	conn            *websocket.Conn
 	client          *Client
 	closeWriteBound time.Duration
-	mu              sync.Mutex
+	writeTurn       chan struct{} // one slot: held by the data write in progress
+	stateMu         sync.Mutex    // guards closed; held only to read or set it
 	closed          bool
 }
 
@@ -138,42 +144,74 @@ func newTTSWebSocket(ctx context.Context, c *Client) (*TTSWebSocket, error) {
 		conn:            conn,
 		client:          c,
 		closeWriteBound: c.closeWriteBound,
+		writeTurn:       make(chan struct{}, 1),
 	}, nil
 }
 
-// Send sends a generation request over the WebSocket.
+// Send sends a generation request over the WebSocket. ctx bounds the wait for the
+// write's turn and the write itself: when it ends, a write in flight is cut and
+// the transport closes, and Send returns ctx's cause.
 func (ws *TTSWebSocket) Send(ctx context.Context, req WSGenerationRequest) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
-	if ws.closed {
-		return fmt.Errorf("cartesia: websocket is closed")
-	}
-
 	data, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("cartesia: marshal ws request: %w", err)
 	}
 
 	ws.client.logger.Debug("ws send", zap.String("context_id", req.ContextID))
-	return ws.conn.WriteMessage(websocket.TextMessage, data)
+	return ws.write(ctx, data)
 }
 
-// Cancel cancels generation for a specific context.
+// Cancel cancels generation for a specific context. ctx bounds it as Send's is.
 func (ws *TTSWebSocket) Cancel(ctx context.Context, contextID string) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
-	if ws.closed {
-		return fmt.Errorf("cartesia: websocket is closed")
-	}
-
 	data, err := json.Marshal(WSCancelRequest{Cancel: true, ContextID: contextID})
 	if err != nil {
 		return fmt.Errorf("cartesia: marshal cancel request: %w", err)
 	}
 
-	return ws.conn.WriteMessage(websocket.TextMessage, data)
+	return ws.write(ctx, data)
+}
+
+// write sends one text frame. It waits for the write's turn only while ctx is
+// live, and never starts a write once ctx has ended. A write in flight is cut
+// when ctx ends: the cut closes the transport, so the write fails at once, and
+// write returns ctx's cause. The cut is stopped and joined before write returns.
+func (ws *TTSWebSocket) write(ctx context.Context, data []byte) error {
+	select {
+	case ws.writeTurn <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("cartesia: websocket write: %w", context.Cause(ctx))
+	}
+	defer func() { <-ws.writeTurn }()
+
+	if ws.isClosed() {
+		return fmt.Errorf("cartesia: websocket is closed")
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("cartesia: websocket write: %w", context.Cause(ctx))
+	}
+	cutDone := make(chan struct{})
+	stopCut := context.AfterFunc(ctx, func() {
+		defer close(cutDone)
+		_ = ws.conn.Close() // fails the write in flight, which then ends at once
+	})
+	err := ws.conn.WriteMessage(websocket.TextMessage, data)
+	if !stopCut() {
+		<-cutDone // the cut ran and closed the transport
+	}
+	if err != nil && ctx.Err() != nil {
+		return fmt.Errorf("cartesia: websocket write: %w", context.Cause(ctx))
+	}
+	if err != nil {
+		return fmt.Errorf("cartesia: websocket write: %w", err)
+	}
+	return nil
+}
+
+// isClosed reports whether Close has begun.
+func (ws *TTSWebSocket) isClosed() bool {
+	ws.stateMu.Lock()
+	defer ws.stateMu.Unlock()
+	return ws.closed
 }
 
 // Receive reads the next message from the WebSocket.
@@ -181,17 +219,14 @@ func (ws *TTSWebSocket) Cancel(ctx context.Context, contextID string) error {
 //
 // Concurrency note: Close() may be called concurrently from another goroutine
 // to unblock a pending ReadMessage. The closed flag is therefore read under
-// the mutex so the race detector stays happy; the subsequent ReadMessage call
-// is not held under the mutex — if Close races with us, conn.Close()
+// stateMu so the race detector stays happy; the subsequent ReadMessage call
+// is not held under any lock — if Close races with us, conn.Close()
 // invalidates the underlying net.Conn and ReadMessage returns a net error,
 // which is the intended shutdown path.
 func (ws *TTSWebSocket) Receive(ctx context.Context) (*WSResponse, error) {
-	ws.mu.Lock()
-	if ws.closed {
-		ws.mu.Unlock()
+	if ws.isClosed() {
 		return nil, fmt.Errorf("cartesia: websocket is closed")
 	}
-	ws.mu.Unlock()
 
 	_, msg, err := ws.conn.ReadMessage()
 	if err != nil {
@@ -211,19 +246,20 @@ func (ws *TTSWebSocket) Receive(ctx context.Context) (*WSResponse, error) {
 }
 
 // Close sends the close frame once, best-effort, and then closes the connection.
-// It never waits for the peer's close. ctx is the closing caller's: when it ends,
-// the frame's write is cut at once and the transport closes, so a peer that holds
-// the frame does not delay the caller. A live ctx leaves the frame's write to the
-// connection's close write bound. The transport closes after the write, whatever
-// its result.
+// It never waits for the peer's close, nor for a send or cancel in flight: a
+// write the peer holds is still in flight when Close sends its frame, and the
+// frame's write is bounded by the close write bound. ctx is the closing caller's:
+// when it ends, the frame's write is cut at once and the transport closes, so a
+// peer that holds the frame does not delay the caller. The transport closes after
+// the write, whatever its result.
 func (ws *TTSWebSocket) Close(ctx context.Context) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
+	ws.stateMu.Lock()
 	if ws.closed {
+		ws.stateMu.Unlock()
 		return nil
 	}
 	ws.closed = true
+	ws.stateMu.Unlock()
 	ws.client.logger.Debug("closing websocket")
 
 	// cutDone closes once the cut has run, so none of its work outlives Close.
